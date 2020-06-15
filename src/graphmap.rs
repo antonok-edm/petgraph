@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{self, Hash};
-use std::iter::FromIterator;
+use std::iter::{Chain, FromIterator};
 use std::iter::{Cloned, DoubleEndedIterator};
 use std::marker::PhantomData;
 use std::ops::{Deref, Index, IndexMut};
@@ -357,19 +357,37 @@ where
         }
     }
 
-    /// Return an iterator of target nodes with an edge starting from `a`,
-    /// paired with their respective edge weights.
+    /// Return an iterator of target nodes with an edge starting from or ending
+    /// at `a`, paired with their respective edge weights.
     ///
-    /// - `Directed`: Outgoing edges from `a`.
+    /// Produces an empty iterator if the node doesn't exist.<br>
+    /// Iterator element type is `(N, &E)`.
+    pub fn edges_undirected(&self, from: N) -> Edges<N, E, Ty> {
+        Edges::Chain(self.edges_directed_iter(from, Outgoing).chain(self.edges_directed_iter(from, Incoming)))
+    }
+
+    /// Return an iterator of target nodes with an edge starting from or ending
+    /// at `a`, paired with their respective edge weights.
+    ///
+    /// - `Directed`, `Outgoing`: All edges from `a`.
+    /// - `Directed`, `Incoming`: All edges to `a`.
     /// - `Undirected`: All edges from or to `a`.
     ///
     /// Produces an empty iterator if the node doesn't exist.<br>
     /// Iterator element type is `(N, &E)`.
-    pub fn edges(&self, from: N) -> Edges<N, E, Ty> {
-        Edges {
+    pub fn edges_directed(&self, from: N, direction: Direction) -> Edges<N, E, Ty> {
+        Edges::Single(self.edges_directed_iter(from, direction))
+    }
+
+    /// Returns an `EdgeIter` of all edges of `a`, in the specified direction.
+    ///
+    /// Identical to `edges_directed` except for the return type.
+    fn edges_directed_iter(&self, from: N, direction: Direction) -> EdgeIter<N, E, Ty> {
+        EdgeIter {
             from,
-            iter: self.neighbors(from),
+            iter: self.neighbors_directed(from, direction),
             edges: &self.edges,
+            direction,
         }
     }
 
@@ -571,14 +589,14 @@ where
     }
 }
 
-pub struct Edges<'a, N, E: 'a, Ty>
+/// Iterator over the edges from and/or to a node.
+pub enum Edges<'a, N, E: 'a, Ty>
 where
     N: 'a + NodeTrait,
     Ty: EdgeType,
 {
-    from: N,
-    edges: &'a IndexMap<(N, N), E>,
-    iter: Neighbors<'a, N, Ty>,
+    Single(EdgeIter<'a, N, E, Ty>),
+    Chain(Chain<EdgeIter<'a, N, E, Ty>, EdgeIter<'a, N, E, Ty>>),
 }
 
 impl<'a, N, E, Ty> Iterator for Edges<'a, N, E, Ty>
@@ -589,13 +607,47 @@ where
 {
     type Item = (N, N, &'a E);
     fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Edges::Single(iter) => iter.next(),
+            Edges::Chain(iter) => iter.next(),
+        }
+    }
+}
+
+pub struct EdgeIter<'a, N, E: 'a, Ty>
+where
+    N: 'a + NodeTrait,
+    Ty: EdgeType,
+{
+    from: N,
+    edges: &'a IndexMap<(N, N), E>,
+    iter: NeighborsDirected<'a, N, Ty>,
+    direction: Direction,
+}
+
+impl<'a, N, E, Ty> Iterator for EdgeIter<'a, N, E, Ty>
+where
+    N: 'a + NodeTrait,
+    E: 'a,
+    Ty: EdgeType,
+{
+    type Item = (N, N, &'a E);
+    fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
             None => None,
             Some(b) => {
-                let a = self.from;
-                match self.edges.get(&GraphMap::<N, E, Ty>::edge_key(a, b)) {
-                    None => unreachable!(),
-                    Some(edge) => Some((a, b, edge)),
+                if self.direction == Outgoing {
+                    let a = self.from;
+                    match self.edges.get(&GraphMap::<N, E, Ty>::edge_key(a, b)) {
+                        None => unreachable!(),
+                        Some(edge) => Some((a, b, edge)),
+                    }
+                } else {
+                    let a = self.from;
+                    match self.edges.get(&GraphMap::<N, E, Ty>::edge_key(b, a)) {
+                        None => unreachable!(),
+                        Some(edge) => Some((b, a, edge)),
+                    }
                 }
             }
         }
@@ -732,7 +784,7 @@ where
 {
     type Edges = Edges<'a, N, E, Ty>;
     fn edges(self, a: Self::NodeId) -> Self::Edges {
-        self.edges(a)
+        self.edges_directed(a, Outgoing)
     }
 }
 
